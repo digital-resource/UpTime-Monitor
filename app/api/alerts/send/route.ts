@@ -131,6 +131,11 @@ export async function POST(req: NextRequest) {
       alert.recipient
     );
     await db.from("alerts").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", alert.id);
+    // Alert rows queued by the worker don't carry an incident_id yet (the
+    // incident is created by a DB trigger after the worker already snapshot
+    // its state) — match the still-open incident by website instead.
+    await db.from("incidents").update({ email_alert_sent: true })
+      .eq("website_id", alert.website_id).eq("status", "open");
     sent++;
   }
 

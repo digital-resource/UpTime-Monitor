@@ -211,14 +211,15 @@ async function sendSlack(env: Env, text: string): Promise<boolean> {
 async function checkAllWebsites(env: Env) {
   const now = new Date().toISOString();
 
-  // 1. Load the 90 sites most overdue for a check (1 subrequest)
+  // 1. Load the sites most overdue for a check (1 subrequest)
   //    ORDER BY last_checked_at ASC NULLS FIRST → always checks the stalest sites first.
-  //    With 196 sites and cron every 2 min, each site is checked every ~5 min.
-  //    Keeping to 45 ensures total subrequests stay well within Cloudflare free-plan limits:
-  //      1 (get) + 45 (checks, redirect:manual = 1 each) + 1 (post) + 1-2 (slack) = ~48 subrequests.
+  //    With 672 sites and cron every 2 min, each site is checked roughly every ~30 min.
+  //    Keeping to 40 ensures total subrequests stay well within Cloudflare free-plan limits:
+  //      1 (get) + 40 (checks) + 1 (post) + 1-2 (slack) + 1 (down-incident flag)
+  //      + 1 (recovery-incident flag) + 1 (email trigger) = ~48 subrequests worst case.
   const sites = await supabaseGet(
     env,
-    `websites?monitoring_state=eq.enabled&order=last_checked_at.asc.nullsfirst&limit=45&select=id,url,timeout,expected_http_status,consecutive_failures,failure_threshold,has_active_incident,active_incident_id,name,client,last_error`
+    `websites?monitoring_state=eq.enabled&order=last_checked_at.asc.nullsfirst&limit=40&select=id,url,timeout,expected_http_status,consecutive_failures,failure_threshold,has_active_incident,active_incident_id,name,client,last_error`
   ) as Array<{
     id: string; url: string; timeout: number; expected_http_status: number;
     consecutive_failures: number; failure_threshold: number;
@@ -288,7 +289,7 @@ async function checkAllWebsites(env: Env) {
   const allAlerts = [...newDownAlerts, ...recoveryAlerts];
   if (parts.length > 0 && allAlerts.length > 0) {
     const sentOk = await sendSlack(env, parts.join("\n\n"));
-    await supabasePost(env, "alerts", allAlerts.map(a => ({
+    const alertRows = allAlerts.map(a => ({
       website_id:   a.websiteId,
       website_name: a.websiteName,
       incident_id:  a.incidentId,
@@ -297,7 +298,56 @@ async function checkAllWebsites(env: Env) {
       recipient:    "#alerts",
       status:       sentOk ? "sent" : "failed",
       sent_at:      sentOk ? now : null,
-    })));
+    }));
+
+    // Down-alert email to the web team — queued as "email"/"down" rows the
+    // app's /api/alerts/send route (Mailgun) picks up. No recovery emails,
+    // no other recipients — just this one address, per what was asked for.
+    if (env.ALERT_EMAIL_TO && newDownAlerts.length > 0) {
+      alertRows.push(...newDownAlerts.map(a => ({
+        website_id:   a.websiteId,
+        website_name: a.websiteName,
+        incident_id:  a.incidentId,
+        type:         a.type,
+        channel:      "email",
+        recipient:    env.ALERT_EMAIL_TO,
+        status:       "queued",
+        sent_at:      null,
+      })));
+    }
+
+    await supabasePost(env, "alerts", alertRows);
+
+    // Reflect the Slack send back onto the incident rows — the UI's
+    // Slack/Email columns read these flags, and they were never being set.
+    if (sentOk) {
+      if (newDownAlerts.length > 0) {
+        const ids = newDownAlerts.map(a => a.websiteId).join(",");
+        await supabasePatch(env, `incidents?website_id=in.(${ids})&status=eq.open`, {
+          slack_alert_sent: true,
+        });
+      }
+      if (recoveryAlerts.length > 0) {
+        const ids = recoveryAlerts.map(a => a.incidentId).filter(Boolean).join(",");
+        if (ids) {
+          await supabasePatch(env, `incidents?id=in.(${ids})`, {
+            recovery_alert_sent: true,
+          });
+        }
+      }
+    }
+
+    // Ask the app to actually send the queued email alerts via Mailgun.
+    if (env.ALERT_EMAIL_TO && newDownAlerts.length > 0 && env.APP_API_URL) {
+      try {
+        await fetch(`${env.APP_API_URL}/api/alerts/send`, {
+          method: "POST",
+          headers: { "x-worker-secret": env.WORKER_SECRET },
+        });
+      } catch (err) {
+        console.error("[Email alert trigger] Error:", err);
+      }
+    }
   }
 }
 
