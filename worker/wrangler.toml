@@ -1,0 +1,27 @@
+name            = "uptime-monitor-worker"
+main            = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = [
+  "*/2 * * * *",   # every 2 minutes — check all websites
+  "0 * * * *"      # every hour — sync from Cloudflare / Rocket.net
+]
+
+# Secrets (deployed via: wrangler secret bulk .secrets.json)
+# SUPABASE_URL            ✅ set
+# SUPABASE_SERVICE_KEY    ✅ set
+# CLOUDFLARE_API_TOKEN    ✅ set
+# CLOUDFLARE_ACCOUNT_ID   ✅ set
+# ROCKET_NET_EMAIL        ✅ set
+# ROCKET_NET_PASSWORD     ✅ set
+# SLACK_WEBHOOK_URL       ✅ set
+# WORKER_SECRET           ✅ set
+# APP_API_URL             ✅ set (update after Vercel deploy)
+# MAILGUN_API_KEY         ⏳ pending
+# MAILGUN_DOMAIN          ⏳ pending
+# MAILGUN_FROM_EMAIL      ⏳ pending
+# ALERT_EMAIL_TO          ⏳ pending
+# Webflow: no worker secret needed — OAuth token lives in Supabase
+# `integration_secrets`, set via the dashboard's Webflow "Connect" button.

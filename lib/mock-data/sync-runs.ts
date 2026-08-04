@@ -1,0 +1,80 @@
+import type { SyncRun } from "@/lib/types";
+
+const now = new Date();
+const hoursAgo = (h: number) => new Date(now.getTime() - h * 3600000).toISOString();
+const minutesAgo = (m: number) => new Date(now.getTime() - m * 60000).toISOString();
+const _daysAgo = (d: number) => new Date(now.getTime() - d * 86400000).toISOString();
+
+export const MOCK_SYNC_RUNS: SyncRun[] = [
+  {
+    id: "sync_001",
+    integrationId: "int_001",
+    integrationName: "Cloudflare",
+    provider: "Cloudflare",
+    startedAt: minutesAgo(30),
+    completedAt: minutesAgo(28),
+    duration: 127,
+    trigger: "scheduled",
+    result: "success",
+    added: 3,
+    updated: 8,
+    skipped: 2,
+    failed: 0,
+    triggeredBy: "Scheduler",
+    logs: [
+      { id: "sl_001", syncRunId: "sync_001", level: "info", message: "Starting Cloudflare sync for 12 zones", timestamp: minutesAgo(30), metadata: {} },
+      { id: "sl_002", syncRunId: "sync_001", level: "info", message: "Discovered 156 websites across all zones", timestamp: minutesAgo(29.5), metadata: {} },
+      { id: "sl_003", syncRunId: "sync_001", level: "info", message: "Added 3 new websites", timestamp: minutesAgo(29), metadata: {} },
+      { id: "sl_004", syncRunId: "sync_001", level: "info", message: "Updated 8 existing websites", timestamp: minutesAgo(28.5), metadata: {} },
+      { id: "sl_005", syncRunId: "sync_001", level: "warn", message: "Skipped 2 duplicate entries (hostname conflict)", timestamp: minutesAgo(28.2), metadata: {} },
+      { id: "sl_006", syncRunId: "sync_001", level: "info", message: "Sync completed successfully in 127s", timestamp: minutesAgo(28), metadata: {} },
+    ],
+    createdAt: minutesAgo(30),
+  },
+  {
+    id: "sync_002",
+    integrationId: "int_002",
+    integrationName: "Rocket.net",
+    provider: "Rocket.net",
+    startedAt: hoursAgo(1),
+    completedAt: hoursAgo(0.97),
+    duration: 95,
+    trigger: "manual",
+    result: "success",
+    added: 1,
+    updated: 3,
+    skipped: 0,
+    failed: 0,
+    triggeredBy: "Sarah Chen",
+    logs: [
+      { id: "sl_007", syncRunId: "sync_002", level: "info", message: "Starting Rocket.net sync", timestamp: hoursAgo(1), metadata: {} },
+      { id: "sl_008", syncRunId: "sync_002", level: "info", message: "Discovered 89 websites", timestamp: hoursAgo(0.99), metadata: {} },
+      { id: "sl_009", syncRunId: "sync_002", level: "info", message: "Added 1 new website", timestamp: hoursAgo(0.98), metadata: {} },
+      { id: "sl_010", syncRunId: "sync_002", level: "info", message: "Updated 3 existing websites", timestamp: hoursAgo(0.975), metadata: {} },
+      { id: "sl_011", syncRunId: "sync_002", level: "info", message: "Sync completed in 95s", timestamp: hoursAgo(0.97), metadata: {} },
+    ],
+    createdAt: hoursAgo(1),
+  },
+  {
+    id: "sync_003",
+    integrationId: "int_003",
+    integrationName: "Webflow",
+    provider: "Webflow",
+    startedAt: hoursAgo(2),
+    completedAt: hoursAgo(1.99),
+    duration: 12,
+    trigger: "scheduled",
+    result: "failed",
+    added: 0,
+    updated: 0,
+    skipped: 0,
+    failed: 0,
+    triggeredBy: "Scheduler",
+    logs: [
+      { id: "sl_012", syncRunId: "sync_003", level: "info", message: "Starting Webflow sync", timestamp: hoursAgo(2), metadata: {} },
+      { id: "sl_013", syncRunId: "sync_003", level: "error", message: "Authentication failed: OAuth token expired (401 Unauthorized)", timestamp: hoursAgo(1.99), metadata: { statusCode: 401 } },
+      { id: "sl_014", syncRunId: "sync_003", level: "error", message: "Sync aborted due to authentication error", timestamp: hoursAgo(1.99), metadata: {} },
+    ],
+    createdAt: hoursAgo(2),
+  },
+];
