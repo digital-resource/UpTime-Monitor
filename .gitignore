@@ -37,3 +37,6 @@ check_sites_now.py
 
 # Design export archives
 *.zip
+
+.vercel
+.env*

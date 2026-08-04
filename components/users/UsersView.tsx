@@ -197,6 +197,88 @@ function InviteDialog({ open, onClose, onInvited }: InviteDialogProps) {
   );
 }
 
+interface EditRoleDialogProps {
+  user: User | null;
+  onClose: () => void;
+  onSaved: (id: string, role: UserRole) => void;
+}
+
+function EditRoleDialog({ user, onClose, onSaved }: EditRoleDialogProps) {
+  const [role, setRole] = useState<UserRole>(user?.role ?? "viewer");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (user) setRole(user.role);
+  }, [user]);
+
+  async function handleSave() {
+    if (!user) return;
+    setSaving(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.from("users").update({ role }).eq("id", user.id);
+      if (error) {
+        toast.error("Failed to update role");
+        return;
+      }
+      onSaved(user.id, role);
+      toast.success("Role updated", { description: `${user.name} is now ${ROLE_CONFIG[role].label}` });
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!user} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="bg-[#18181B] border-[#27272A] text-zinc-100 max-w-md">
+        <DialogHeader>
+          <DialogTitle className="text-zinc-50">Edit Role</DialogTitle>
+        </DialogHeader>
+        {user && (
+          <div className="space-y-4 mt-2">
+            <div className="flex items-center gap-3">
+              <div className={cn("w-8 h-8 rounded-full border flex items-center justify-center flex-shrink-0", ROLE_CONFIG[user.role].avatarBg)}>
+                <span className={cn("text-[10px] font-bold", ROLE_CONFIG[user.role].avatarText)}>
+                  {getInitials(user.name)}
+                </span>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-zinc-100">{user.name}</p>
+                <p className="text-xs text-zinc-500">{user.email}</p>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-zinc-400">Role</Label>
+              <Select value={role} onValueChange={(v) => setRole(v as UserRole)}>
+                <SelectTrigger className="bg-[#27272A] border-[#3F3F46] text-zinc-100">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-[#18181B] border-[#27272A]">
+                  {(["super_admin", "admin", "operator", "viewer"] as UserRole[]).map((r) => (
+                    <SelectItem key={r} value={r} className="text-zinc-300 focus:bg-zinc-800 focus:text-zinc-100">
+                      {ROLE_CONFIG[r].label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-zinc-500 mt-1">{ROLE_DESCRIPTIONS[role]}</p>
+            </div>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button variant="outline" onClick={onClose} className="border-[#27272A] bg-transparent text-zinc-300 hover:bg-zinc-800">
+                Cancel
+              </Button>
+              <Button onClick={handleSave} disabled={saving || role === user.role} className="bg-blue-600 hover:bg-blue-700 text-white">
+                {saving ? "Saving..." : "Save Role"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 const PERMISSIONS: { label: string; super_admin: boolean; admin: boolean; operator: boolean; viewer: boolean }[] = [
   { label: "View Websites", super_admin: true, admin: true, operator: true, viewer: true },
   { label: "Add/Edit Websites", super_admin: true, admin: true, operator: true, viewer: false },
@@ -227,6 +309,7 @@ export function UsersView() {
   const [loading, setLoading] = useState(true);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [matrixOpen, setMatrixOpen] = useState(false);
+  const [editingUser, setEditingUser] = useState<User | null>(null);
 
   useEffect(() => {
     const supabase = createClient();
@@ -277,6 +360,22 @@ export function UsersView() {
       setUsers((prev) => prev.map((u) => u.id === id ? { ...u, isActive: user.isActive } : u));
     } else {
       toast.success(newIsActive ? "User activated" : "User deactivated");
+    }
+  }
+
+  function handleRoleSaved(id: string, role: UserRole) {
+    setUsers((prev) => prev.map((u) => u.id === id ? { ...u, role } : u));
+  }
+
+  async function handleResetPassword(user: User) {
+    const supabase = createClient();
+    const { error } = await supabase.auth.resetPasswordForEmail(user.email, {
+      redirectTo: `${window.location.origin}/reset-password`,
+    });
+    if (error) {
+      toast.error("Failed to send reset email");
+    } else {
+      toast.success("Password reset email sent", { description: user.email });
     }
   }
 
@@ -405,13 +504,13 @@ export function UsersView() {
                           <DropdownMenuContent className="bg-[#18181B] border-[#27272A] text-zinc-300" align="end">
                             <DropdownMenuItem
                               className="hover:bg-zinc-800 hover:text-zinc-100 cursor-pointer"
-                              onSelect={() => toast.info("Edit role — coming soon")}
+                              onSelect={() => setEditingUser(user)}
                             >
                               Edit Role
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               className="hover:bg-zinc-800 hover:text-zinc-100 cursor-pointer"
-                              onSelect={() => toast.info("Password reset email sent")}
+                              onSelect={() => handleResetPassword(user)}
                             >
                               Reset Password
                             </DropdownMenuItem>
@@ -500,6 +599,11 @@ export function UsersView() {
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
         onInvited={handleInvited}
+      />
+      <EditRoleDialog
+        user={editingUser}
+        onClose={() => setEditingUser(null)}
+        onSaved={handleRoleSaved}
       />
     </div>
   );

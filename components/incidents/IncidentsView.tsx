@@ -416,6 +416,7 @@ export function IncidentsView() {
   const [dateFilter, setDateFilter] = useState<string | undefined>(undefined);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [sheetIncident, setSheetIncident] = useState<Incident | null>(null);
+  const [activeCount, setActiveCount] = useState(0);
   const prevStatus = useRef(statusFilter);
 
   const load = async () => {
@@ -431,6 +432,10 @@ export function IncidentsView() {
     }
   };
 
+  const loadActiveCount = async () => {
+    setActiveCount(await incidentService.countActive());
+  };
+
   useEffect(() => {
     if (prevStatus.current !== statusFilter) {
       prevStatus.current = statusFilter;
@@ -439,13 +444,16 @@ export function IncidentsView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, dateFilter]);
 
-  const activeCount = incidents.filter((i) => i.status === "open").length;
+  useEffect(() => {
+    loadActiveCount();
+  }, []);
 
   async function handleAcknowledge(id: string) {
     try {
       await incidentService.acknowledge(id);
       toast.success("Incident acknowledged");
       load();
+      loadActiveCount();
     } catch {
       toast.error("Failed to acknowledge");
     }
@@ -456,6 +464,7 @@ export function IncidentsView() {
       await incidentService.resolve(id);
       toast.success("Incident resolved");
       load();
+      loadActiveCount();
     } catch {
       toast.error("Failed to resolve");
     }

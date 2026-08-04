@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { createClient } from "@/lib/supabase/client";
 
 type FormState = "idle" | "loading" | "success";
 
@@ -23,11 +24,16 @@ export default function ForgotPasswordPage() {
     if (!email.trim() || isLoading) return;
 
     setFormState("loading");
-    setSubmittedEmail(email.trim());
+    const trimmedEmail = email.trim();
+    setSubmittedEmail(trimmedEmail);
 
-    // Mock 1s delay — no Supabase
-    await new Promise((r) => setTimeout(r, 1000));
+    const supabase = createClient();
+    await supabase.auth.resetPasswordForEmail(trimmedEmail, {
+      redirectTo: `${window.location.origin}/reset-password`,
+    });
 
+    // Always show success regardless of whether the email exists —
+    // avoids leaking which addresses have accounts.
     setFormState("success");
   }
 

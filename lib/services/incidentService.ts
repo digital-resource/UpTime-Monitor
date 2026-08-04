@@ -93,6 +93,16 @@ export const incidentService = {
     return (data ?? []).map(mapRow);
   },
 
+  async countActive(): Promise<number> {
+    const db = createClient();
+    const { count, error } = await db
+      .from("incidents")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "open");
+    if (error) throw new Error(error.message);
+    return count ?? 0;
+  },
+
   async acknowledge(id: string): Promise<Incident> {
     const db = createClient();
     await db.from("incidents").update({
