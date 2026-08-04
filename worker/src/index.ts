@@ -430,8 +430,8 @@ async function syncWebflow(env: Env) {
     const existing = await supabaseGet(env, `websites?select=domain`) as Array<{ domain: string }>;
     const existingDomains = new Set(existing.map((e) => e.domain));
 
-    let added = 0;
     let discovered = 0;
+    const rows: Record<string, unknown>[] = [];
     for (const site of wfSites) {
       for (const cd of (site.customDomains ?? [])) {
         // Only import domains actually live right now — a connected-but-never-
@@ -440,7 +440,7 @@ async function syncWebflow(env: Env) {
         discovered++;
         const domain = cd.url.replace(/^https?:\/\//, "").replace(/\/$/, "");
         if (!domain || existingDomains.has(domain)) continue;
-        await supabasePost(env, "websites", {
+        rows.push({
           name:            site.displayName ?? domain,
           url:             `https://${domain}`,
           domain,
@@ -449,10 +449,17 @@ async function syncWebflow(env: Env) {
           status:          "pending",
           monitoring_state: "enabled",
         });
-        added++;
         existingDomains.add(domain);
       }
     }
+
+    // Insert as one bulk request — a per-site POST loop can blow past the
+    // Workers per-invocation subrequest cap on large workspaces, killing the
+    // request before the sync_runs/integrations status update ever runs.
+    if (rows.length > 0) {
+      await supabasePost(env, "websites", rows);
+    }
+    const added = rows.length;
     console.log(`[Webflow sync] Added ${added} new custom domains`);
     return { discovered, added };
   } catch (err) {
