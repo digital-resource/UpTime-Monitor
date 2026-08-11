@@ -9,11 +9,8 @@
  *   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID,
  *   ROCKET_NET_API_KEY, ROCKET_NET_TEAM_ID,
  *   SLACK_WEBHOOK_URL,
- *   ALERT_EMAIL_TO,
+ *   MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_FROM_EMAIL, ALERT_EMAIL_TO,
  *   APP_API_URL, WORKER_SECRET
- *
- * Email down-alerts are queued here but actually sent by the app's
- * /api/alerts/send route (Gmail SMTP) — see app/api/alerts/send/route.ts.
  */
 
 export interface Env {
@@ -27,6 +24,9 @@ export interface Env {
   // the dashboard's /api/integrations/webflow/callback route and read from
   // Supabase's `integration_secrets` table at sync time (see syncWebflow).
   SLACK_WEBHOOK_URL:     string;
+  MAILGUN_API_KEY:       string;
+  MAILGUN_DOMAIN:        string;
+  MAILGUN_FROM_EMAIL:    string;
   ALERT_EMAIL_TO:        string;
   APP_API_URL:           string; // optional — only used for manual triggers
   WORKER_SECRET:         string;
@@ -301,7 +301,7 @@ async function checkAllWebsites(env: Env) {
     }));
 
     // Down-alert email to the web team — queued as "email"/"down" rows the
-    // app's /api/alerts/send route (Gmail SMTP) picks up. No recovery emails,
+    // app's /api/alerts/send route (Mailgun) picks up. No recovery emails,
     // no other recipients — just this one address, per what was asked for.
     if (env.ALERT_EMAIL_TO && newDownAlerts.length > 0) {
       alertRows.push(...newDownAlerts.map(a => ({
@@ -337,7 +337,7 @@ async function checkAllWebsites(env: Env) {
       }
     }
 
-    // Ask the app to actually send the queued email alerts via Gmail SMTP.
+    // Ask the app to actually send the queued email alerts via Mailgun.
     if (env.ALERT_EMAIL_TO && newDownAlerts.length > 0 && env.APP_API_URL) {
       try {
         await fetch(`${env.APP_API_URL}/api/alerts/send`, {
