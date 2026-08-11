@@ -2,7 +2,10 @@
  * Monitoring Hub — Cloudflare Worker
  *
  * Cron: every 2 minutes → checkAllWebsites()
- * Cron: every hour      → syncAllProviders()
+ * Cron: every hour      → syncAllProviders(), and at 9 AM / 5 PM America/New_York
+ *                          (checked live each hour so it self-adjusts for
+ *                          DST — no separate cron trigger needed) →
+ *                          sendOpenIncidentsDigest()
  *
  * Secrets required (set via wrangler secret put):
  *   SUPABASE_URL, SUPABASE_SERVICE_KEY,
@@ -351,6 +354,51 @@ async function checkAllWebsites(env: Env) {
   }
 }
 
+// ─── Twice-daily open-incidents Slack digest (9 AM / 5 PM Eastern) ────────
+//
+// Separate from the real-time down/recovery alerts sent in checkAllWebsites
+// — this is a standing summary of everything still open at digest time,
+// same set the dashboard's Active tab shows (incidents.status = 'open').
+
+function formatDurationShort(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}h ${mins % 60}m`;
+}
+
+function isDigestHourEastern(): boolean {
+  const hour = Number(
+    new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false }).format(new Date())
+  );
+  return hour === 9 || hour === 17;
+}
+
+async function sendOpenIncidentsDigest(env: Env) {
+  const openIncidents = await supabaseGet(
+    env,
+    `incidents?status=eq.open&order=started_at.asc&select=website_name,website_url,client,started_at,error`
+  ) as Array<{ website_name: string; website_url: string; client: string | null; started_at: string; error: string | null }>;
+
+  if (!Array.isArray(openIncidents)) return;
+
+  const now = Date.now();
+  let text: string;
+  if (openIncidents.length === 0) {
+    text = `✅ *Daily Status Update* — all monitored sites are currently up. No open incidents.`;
+  } else {
+    const lines = openIncidents.map(inc => {
+      const downFor = formatDurationShort((now - new Date(inc.started_at).getTime()) / 1000);
+      return `• <${inc.website_url}|${inc.website_name}>${inc.client ? ` (${inc.client})` : ""}\n   🔻 Down ${downFor} — ${inc.error ?? "Unknown error"}`;
+    });
+    text = `🟡 *Daily Status Update* — ${openIncidents.length} site${openIncidents.length === 1 ? "" : "s"} currently down:\n\n${lines.join("\n\n")}`;
+  }
+
+  await sendSlack(env, text);
+}
+
 // ─── Cloudflare domain sync ──────────────────────────────────
 
 async function syncCloudflare(env: Env) {
@@ -539,6 +587,11 @@ export default {
     if (controller.cron === "0 * * * *") {
       // Top of every hour — sync providers
       await syncAllProviders(env);
+      // At 9 AM / 5 PM America/New_York (checked live, so DST-safe) — send
+      // the twice-daily open-incidents Slack digest.
+      if (isDigestHourEastern()) {
+        await sendOpenIncidentsDigest(env);
+      }
     } else {
       // Every 2 minutes — check websites
       await checkAllWebsites(env);
@@ -562,6 +615,15 @@ export default {
       } catch (err) {
         const msg = err instanceof Error ? `${err.name}: ${err.message}\n${err.stack}` : String(err);
         return new Response(`Worker error:\n${msg}`, { status: 500 });
+      }
+    }
+    if (path === "/digest") {
+      try {
+        await sendOpenIncidentsDigest(env);
+        return new Response("Digest sent", { status: 200 });
+      } catch (err) {
+        const msg = err instanceof Error ? `${err.name}: ${err.message}\n${err.stack}` : String(err);
+        return new Response(`Digest error:\n${msg}`, { status: 500 });
       }
     }
     if (path === "/sync") {
