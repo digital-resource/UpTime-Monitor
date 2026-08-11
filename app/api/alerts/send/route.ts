@@ -1,9 +1,10 @@
 /**
  * POST /api/alerts/send
- * Processes queued alerts — sends Slack and Mailgun messages.
+ * Processes queued alerts — sends Slack and email (Gmail SMTP) messages.
  * Called by the Cloudflare Worker after each check cycle.
  */
 import { NextRequest, NextResponse } from "next/server";
+import nodemailer from "nodemailer";
 import { createServiceClient } from "@/lib/supabase/server";
 
 function authorized(req: NextRequest) {
@@ -21,27 +22,26 @@ async function sendSlack(text: string) {
   });
 }
 
-async function sendMailgun(subject: string, text: string, to: string) {
-  const apiKey = process.env.MAILGUN_API_KEY;
-  const domain = process.env.MAILGUN_DOMAIN;
-  const from   = process.env.MAILGUN_FROM_EMAIL;
-  if (!apiKey || !domain || !from || !to) return;
+let gmailTransport: ReturnType<typeof nodemailer.createTransport> | null = null;
+function getGmailTransport() {
+  const user = process.env.GMAIL_USER;
+  const pass = process.env.GMAIL_APP_PASSWORD;
+  if (!user || !pass) return null;
+  if (!gmailTransport) {
+    gmailTransport = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user, pass },
+    });
+  }
+  return gmailTransport;
+}
 
-  const form = new URLSearchParams({
-    from,
-    to,
-    subject,
-    text,
-  });
+async function sendEmail(subject: string, text: string, to: string) {
+  const transport = getGmailTransport();
+  const from = process.env.GMAIL_USER;
+  if (!transport || !from || !to) return;
 
-  await fetch(`https://api.mailgun.net/v3/${domain}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: "Basic " + Buffer.from(`api:${apiKey}`).toString("base64"),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: form.toString(),
-  });
+  await transport.sendMail({ from, to, subject, text });
 }
 
 export async function POST(req: NextRequest) {
@@ -112,7 +112,7 @@ export async function POST(req: NextRequest) {
         `✅ *Website Back Online*\nSite: ${alert.website_name}\nDowntime: ${downtime}\nRecovered at: ${new Date().toLocaleTimeString()}`
       );
     } else if (alert.channel === "email") {
-      await sendMailgun(
+      await sendEmail(
         `Website Back Online: ${alert.website_name}`,
         `Website: ${alert.website_name}\nDowntime: ${downtime}\nRecovered at: ${new Date().toISOString()}`,
         alert.recipient
@@ -125,7 +125,7 @@ export async function POST(req: NextRequest) {
   // Remaining (email down alerts etc.)
   for (const alert of otherAlerts.filter((a) => a.type === "down" && a.channel === "email")) {
     const inc = alert.incidents as { error?: string; failed_checks?: number } | null;
-    await sendMailgun(
+    await sendEmail(
       `Website Down: ${alert.website_name}`,
       `Website: ${alert.website_name}\nStatus: Down\nReason: ${inc?.error ?? "Unknown"}\nFailed checks: ${inc?.failed_checks ?? "?"}\nDetected at: ${new Date().toISOString()}`,
       alert.recipient

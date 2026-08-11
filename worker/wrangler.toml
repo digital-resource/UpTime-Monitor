@@ -19,9 +19,9 @@ crons = [
 # SLACK_WEBHOOK_URL       ✅ set
 # WORKER_SECRET           ✅ set
 # APP_API_URL             ✅ set (update after Vercel deploy)
-# MAILGUN_API_KEY         ⏳ pending
-# MAILGUN_DOMAIN          ⏳ pending
-# MAILGUN_FROM_EMAIL      ⏳ pending
 # ALERT_EMAIL_TO          ⏳ pending
+# (Gmail sending creds — GMAIL_USER / GMAIL_APP_PASSWORD — live in the
+#  Next.js app's env, not the worker; the worker just queues the alert
+#  and pings /api/alerts/send.)
 # Webflow: no worker secret needed — OAuth token lives in Supabase
 # `integration_secrets`, set via the dashboard's Webflow "Connect" button.
