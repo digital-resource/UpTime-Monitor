@@ -148,6 +148,12 @@ interface WebsiteTableProps {
   onPauseResume: (id: string, isPaused: boolean) => void;
   onDelete: (id: string, name: string) => void;
   onDuplicate: (id: string) => void;
+  onBulkRunCheck: (ids: string[]) => void;
+  onBulkPause: (ids: string[]) => void;
+  onBulkResume: (ids: string[]) => void;
+  onBulkAddTag: (ids: string[]) => void;
+  onBulkExport: (ids: string[]) => void;
+  onBulkDelete: (ids: string[]) => void;
   columnVisibility: Record<string, boolean>;
 }
 
@@ -242,6 +248,12 @@ export function WebsiteTable({
   onPauseResume,
   onDelete,
   onDuplicate,
+  onBulkRunCheck,
+  onBulkPause,
+  onBulkResume,
+  onBulkAddTag,
+  onBulkExport,
+  onBulkDelete,
   columnVisibility,
 }: WebsiteTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -503,6 +515,12 @@ export function WebsiteTable({
   });
 
   const selectedCount = Object.keys(rowSelection).length;
+  const selectedIds = table.getSelectedRowModel().rows.map((row) => row.original.id);
+
+  function runBulkAction(action: (ids: string[]) => void) {
+    action(selectedIds);
+    setRowSelection({});
+  }
   const { pageIndex, pageSize } = pagination;
   const pageCount = table.getPageCount();
   const fromRow = pageIndex * pageSize + 1;
@@ -517,6 +535,7 @@ export function WebsiteTable({
           <Button
             size="sm"
             variant="outline"
+            onClick={() => runBulkAction(onBulkRunCheck)}
             className="h-7 text-xs border-zinc-700 bg-zinc-800 text-zinc-300 hover:text-zinc-100 gap-1.5"
           >
             <Play className="w-3 h-3" /> Run Checks
@@ -524,6 +543,7 @@ export function WebsiteTable({
           <Button
             size="sm"
             variant="outline"
+            onClick={() => runBulkAction(onBulkPause)}
             className="h-7 text-xs border-zinc-700 bg-zinc-800 text-zinc-300 hover:text-zinc-100 gap-1.5"
           >
             <Pause className="w-3 h-3" /> Pause
@@ -531,6 +551,7 @@ export function WebsiteTable({
           <Button
             size="sm"
             variant="outline"
+            onClick={() => runBulkAction(onBulkResume)}
             className="h-7 text-xs border-zinc-700 bg-zinc-800 text-zinc-300 hover:text-zinc-100 gap-1.5"
           >
             <Play className="w-3 h-3" /> Resume
@@ -538,6 +559,7 @@ export function WebsiteTable({
           <Button
             size="sm"
             variant="outline"
+            onClick={() => runBulkAction(onBulkAddTag)}
             className="h-7 text-xs border-zinc-700 bg-zinc-800 text-zinc-300 hover:text-zinc-100 gap-1.5"
           >
             <Tag className="w-3 h-3" /> Add Tag
@@ -545,6 +567,7 @@ export function WebsiteTable({
           <Button
             size="sm"
             variant="outline"
+            onClick={() => runBulkAction(onBulkExport)}
             className="h-7 text-xs border-zinc-700 bg-zinc-800 text-zinc-300 hover:text-zinc-100 gap-1.5"
           >
             <Download className="w-3 h-3" /> Export
@@ -552,6 +575,7 @@ export function WebsiteTable({
           <Button
             size="sm"
             variant="outline"
+            onClick={() => runBulkAction(onBulkDelete)}
             className="h-7 text-xs border-rose-800/50 bg-rose-950/30 text-rose-400 hover:text-rose-300 gap-1.5"
           >
             <Trash2 className="w-3 h-3" /> Delete

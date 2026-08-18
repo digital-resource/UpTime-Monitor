@@ -27,7 +27,10 @@ export default function RootLayout({
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet" />
       </head>
-      <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans bg-app-bg text-text-primary antialiased`}>
+      <body
+        className={`${inter.variable} ${jetbrainsMono.variable} font-sans bg-app-bg text-text-primary antialiased`}
+        suppressHydrationWarning
+      >
         {children}
         <Toaster />
       </body>

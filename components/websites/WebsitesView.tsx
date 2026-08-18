@@ -115,10 +115,10 @@ export function WebsitesView() {
     }
   }
 
-  function handleExport() {
-    const csv = [
+  function buildCsv(list: Website[]) {
+    return [
       ["Name", "URL", "Status", "Client", "Provider", "Source", "HTTP Status", "Response Time (ms)", "Uptime 30D (%)"].join(","),
-      ...websites.map((w) =>
+      ...list.map((w) =>
         [
           JSON.stringify(w.name),
           JSON.stringify(w.url),
@@ -132,6 +132,9 @@ export function WebsitesView() {
         ].join(",")
       ),
     ].join("\n");
+  }
+
+  function downloadCsv(csv: string) {
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -139,6 +142,10 @@ export function WebsitesView() {
     a.download = "websites.csv";
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function handleExport() {
+    downloadCsv(buildCsv(websites));
   }
 
   async function handleRunCheck(id: string) {
@@ -177,6 +184,79 @@ export function WebsitesView() {
       load();
     } catch {
       toast.error("Failed to delete");
+    }
+  }
+
+  async function handleBulkRunCheck(ids: string[]) {
+    if (ids.length === 0) return;
+    const t = toast.loading(`Running checks on ${ids.length} website${ids.length !== 1 ? "s" : ""}...`);
+    try {
+      await Promise.all(ids.map((id) => websiteService.runCheck(id)));
+      toast.dismiss(t);
+      toast.success("Checks queued");
+      load();
+    } catch {
+      toast.dismiss(t);
+      toast.error("Failed to run checks");
+    }
+  }
+
+  async function handleBulkPause(ids: string[]) {
+    if (ids.length === 0) return;
+    try {
+      await Promise.all(ids.map((id) => websiteService.pause(id)));
+      toast.success(`Paused ${ids.length} website${ids.length !== 1 ? "s" : ""}`);
+      load();
+    } catch {
+      toast.error("Failed to pause websites");
+    }
+  }
+
+  async function handleBulkResume(ids: string[]) {
+    if (ids.length === 0) return;
+    try {
+      await Promise.all(ids.map((id) => websiteService.resume(id)));
+      toast.success(`Resumed ${ids.length} website${ids.length !== 1 ? "s" : ""}`);
+      load();
+    } catch {
+      toast.error("Failed to resume websites");
+    }
+  }
+
+  async function handleBulkAddTag(ids: string[]) {
+    if (ids.length === 0) return;
+    const tag = window.prompt(`Add tag to ${ids.length} website${ids.length !== 1 ? "s" : ""}:`);
+    if (!tag || !tag.trim()) return;
+    const trimmed = tag.trim();
+    try {
+      await Promise.all(
+        ids.map((id) => {
+          const site = websites.find((w) => w.id === id);
+          const tags = site?.tags?.includes(trimmed) ? site.tags : [...(site?.tags ?? []), trimmed];
+          return websiteService.update(id, { tags });
+        })
+      );
+      toast.success("Tag added");
+      load();
+    } catch {
+      toast.error("Failed to add tag");
+    }
+  }
+
+  function handleBulkExport(ids: string[]) {
+    if (ids.length === 0) return;
+    downloadCsv(buildCsv(websites.filter((w) => ids.includes(w.id))));
+  }
+
+  async function handleBulkDelete(ids: string[]) {
+    if (ids.length === 0) return;
+    if (!confirm(`Delete ${ids.length} website${ids.length !== 1 ? "s" : ""}? This cannot be undone.`)) return;
+    try {
+      await Promise.all(ids.map((id) => websiteService.delete(id)));
+      toast.success(`Deleted ${ids.length} website${ids.length !== 1 ? "s" : ""}`);
+      load();
+    } catch {
+      toast.error("Failed to delete websites");
     }
   }
 
@@ -324,6 +404,12 @@ export function WebsitesView() {
             onPauseResume={handlePauseResume}
             onDelete={handleDelete}
             onDuplicate={handleDuplicate}
+            onBulkRunCheck={handleBulkRunCheck}
+            onBulkPause={handleBulkPause}
+            onBulkResume={handleBulkResume}
+            onBulkAddTag={handleBulkAddTag}
+            onBulkExport={handleBulkExport}
+            onBulkDelete={handleBulkDelete}
             columnVisibility={columnVisibility}
           />
         </div>
