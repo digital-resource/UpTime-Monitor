@@ -222,9 +222,9 @@ async function checkAllWebsites(env: Env) {
   //      + 1 (recovery-incident flag) + 1 (email trigger) = ~48 subrequests worst case.
   const sites = await supabaseGet(
     env,
-    `websites?monitoring_state=eq.enabled&order=last_checked_at.asc.nullsfirst&limit=40&select=id,url,timeout,expected_http_status,consecutive_failures,failure_threshold,has_active_incident,active_incident_id,name,client,last_error`
+    `websites?monitoring_state=eq.enabled&order=last_checked_at.asc.nullsfirst&limit=40&select=id,url,domain,timeout,expected_http_status,consecutive_failures,failure_threshold,has_active_incident,active_incident_id,name,client,last_error`
   ) as Array<{
-    id: string; url: string; timeout: number; expected_http_status: number;
+    id: string; url: string; domain: string; timeout: number; expected_http_status: number;
     consecutive_failures: number; failure_threshold: number;
     has_active_incident: boolean; active_incident_id: string | null;
     name: string; client: string | null; last_error: string | null;
@@ -249,54 +249,38 @@ async function checkAllWebsites(env: Env) {
     checked_at:    now,
   })));
 
-  // 4. Send a single Slack summary for anything that changed this cycle.
+  // 4. Send a single Slack summary for anything that newly went down this cycle.
   //    Single message = 1 subrequest regardless of how many sites changed.
-  type AlertRecord = { websiteId: string; websiteName: string; incidentId: string | null; type: "down" | "recovery"; line: string };
+  //    Recovery ("back up") messages are intentionally NOT sent to Slack — the
+  //    incident itself still auto-resolves via the DB trigger regardless; this
+  //    just keeps the channel to down-alerts only, per what was asked for.
+  type AlertRecord = { websiteId: string; websiteName: string; line: string };
   const newDownAlerts: AlertRecord[] = [];
-  const recoveryAlerts: AlertRecord[] = [];
 
   for (const r of allResults) {
     const site = siteMap.get(r.websiteId);
-    if (!site) continue;
+    if (!site || r.status === "up") continue;
 
-    if (r.status === "up" && site.has_active_incident) {
-      recoveryAlerts.push({
-        websiteId: r.websiteId, websiteName: site.name, incidentId: site.active_incident_id, type: "recovery",
-        line: `• <${site.url}|${site.name}>\n   ✅ Back up — was down due to: ${explainFailure(null, site.last_error)}`,
+    const newFailures = (site.consecutive_failures ?? 0) + 1;
+    const threshold   = site.failure_threshold ?? 3;
+    if (newFailures === threshold && !site.has_active_incident) {
+      newDownAlerts.push({
+        websiteId: r.websiteId, websiteName: site.name,
+        // Domain shown alongside the client/site name so it's clear which
+        // actual site is down — the name alone was confusing people.
+        line: `• <${site.url}|${site.name}> — ${site.domain}\n   🔻 ${explainFailure(r.httpStatus, r.error)}`,
       });
-    } else if (r.status !== "up") {
-      const newFailures = (site.consecutive_failures ?? 0) + 1;
-      const threshold   = site.failure_threshold ?? 3;
-      if (newFailures === threshold && !site.has_active_incident) {
-        newDownAlerts.push({
-          websiteId: r.websiteId, websiteName: site.name, incidentId: null, type: "down",
-          line: `• <${site.url}|${site.name}>\n   🔻 ${explainFailure(r.httpStatus, r.error)}`,
-        });
-      }
     }
   }
 
-  // Build one Slack message combining all alerts (1 subrequest total)
-  const parts: string[] = [];
   if (newDownAlerts.length > 0) {
-    parts.push(
-      `🔴 *${newDownAlerts.length === 1 ? "Site Down" : `${newDownAlerts.length} Sites Down`}*\n\n${newDownAlerts.map(a => a.line).join("\n\n")}`
-    );
-  }
-  if (recoveryAlerts.length > 0) {
-    parts.push(
-      `✅ *${recoveryAlerts.length === 1 ? "Site Recovered" : `${recoveryAlerts.length} Sites Recovered`}*\n\n${recoveryAlerts.map(a => a.line).join("\n\n")}`
-    );
-  }
-
-  const allAlerts = [...newDownAlerts, ...recoveryAlerts];
-  if (parts.length > 0 && allAlerts.length > 0) {
-    const sentOk = await sendSlack(env, parts.join("\n\n"));
-    const alertRows = allAlerts.map(a => ({
+    const text = `🔴 *${newDownAlerts.length === 1 ? "Site Down" : `${newDownAlerts.length} Sites Down`}*\n\n${newDownAlerts.map(a => a.line).join("\n\n")}`;
+    const sentOk = await sendSlack(env, text);
+    const alertRows = newDownAlerts.map(a => ({
       website_id:   a.websiteId,
       website_name: a.websiteName,
-      incident_id:  a.incidentId,
-      type:         a.type,
+      incident_id:  null,
+      type:         "down",
       channel:      "slack",
       recipient:    "#alerts",
       status:       sentOk ? "sent" : "failed",
@@ -306,12 +290,12 @@ async function checkAllWebsites(env: Env) {
     // Down-alert email to the web team — queued as "email"/"down" rows the
     // app's /api/alerts/send route (Mailgun) picks up. No recovery emails,
     // no other recipients — just this one address, per what was asked for.
-    if (env.ALERT_EMAIL_TO && newDownAlerts.length > 0) {
+    if (env.ALERT_EMAIL_TO) {
       alertRows.push(...newDownAlerts.map(a => ({
         website_id:   a.websiteId,
         website_name: a.websiteName,
-        incident_id:  a.incidentId,
-        type:         a.type,
+        incident_id:  null,
+        type:         "down",
         channel:      "email",
         recipient:    env.ALERT_EMAIL_TO,
         status:       "queued",
@@ -324,24 +308,14 @@ async function checkAllWebsites(env: Env) {
     // Reflect the Slack send back onto the incident rows — the UI's
     // Slack/Email columns read these flags, and they were never being set.
     if (sentOk) {
-      if (newDownAlerts.length > 0) {
-        const ids = newDownAlerts.map(a => a.websiteId).join(",");
-        await supabasePatch(env, `incidents?website_id=in.(${ids})&status=eq.open`, {
-          slack_alert_sent: true,
-        });
-      }
-      if (recoveryAlerts.length > 0) {
-        const ids = recoveryAlerts.map(a => a.incidentId).filter(Boolean).join(",");
-        if (ids) {
-          await supabasePatch(env, `incidents?id=in.(${ids})`, {
-            recovery_alert_sent: true,
-          });
-        }
-      }
+      const ids = newDownAlerts.map(a => a.websiteId).join(",");
+      await supabasePatch(env, `incidents?website_id=in.(${ids})&status=eq.open`, {
+        slack_alert_sent: true,
+      });
     }
 
     // Ask the app to actually send the queued email alerts via Mailgun.
-    if (env.ALERT_EMAIL_TO && newDownAlerts.length > 0 && env.APP_API_URL) {
+    if (env.ALERT_EMAIL_TO && env.APP_API_URL) {
       try {
         await fetch(`${env.APP_API_URL}/api/alerts/send`, {
           method: "POST",
@@ -391,7 +365,8 @@ async function sendOpenIncidentsDigest(env: Env) {
   } else {
     const lines = openIncidents.map(inc => {
       const downFor = formatDurationShort((now - new Date(inc.started_at).getTime()) / 1000);
-      return `• <${inc.website_url}|${inc.website_name}>${inc.client ? ` (${inc.client})` : ""}\n   🔻 Down ${downFor} — ${inc.error ?? "Unknown error"}`;
+      const domain = (() => { try { return new URL(inc.website_url).hostname; } catch { return inc.website_url; } })();
+      return `• <${inc.website_url}|${inc.website_name}> — ${domain}${inc.client ? ` (${inc.client})` : ""}\n   🔻 Down ${downFor} — ${inc.error ?? "Unknown error"}`;
     });
     text = `🟡 *Daily Status Update* — ${openIncidents.length} site${openIncidents.length === 1 ? "" : "s"} currently down:\n\n${lines.join("\n\n")}`;
   }
