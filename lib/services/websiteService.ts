@@ -128,8 +128,14 @@ export const websiteService = {
 
   async delete(id: string): Promise<void> {
     const db = createClient();
+    const { data: site } = await db.from("websites").select("domain").eq("id", id).single();
     const { error } = await db.from("websites").delete().eq("id", id);
     if (error) throw new Error(error.message);
+    // Record the domain so the Cloudflare/Rocket.net/Webflow sync doesn't
+    // silently re-import it just because it's still a zone/site upstream.
+    if (site?.domain) {
+      await db.from("excluded_domains").upsert({ domain: site.domain, reason: "manual delete" });
+    }
   },
 
   async pause(id: string): Promise<Website> {

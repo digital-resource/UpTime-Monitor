@@ -241,6 +241,17 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ─── excluded_domains ────────────────────────────────────────
+-- Domains a user explicitly deleted from monitoring. The Cloudflare/
+-- Rocket.net/Webflow sync checks this before re-importing a domain, so a
+-- deleted site doesn't silently come back on the next hourly sync just
+-- because it's still a zone/site on the provider side.
+CREATE TABLE IF NOT EXISTS excluded_domains (
+  domain      TEXT PRIMARY KEY,
+  excluded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reason      TEXT
+);
+
 -- ─── Indexes ─────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_websites_status           ON websites(status);
 CREATE INDEX IF NOT EXISTS idx_websites_monitoring_state ON websites(monitoring_state);
@@ -282,12 +293,17 @@ ALTER TABLE maintenance_windows ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_events        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE settings            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE excluded_domains    ENABLE ROW LEVEL SECURITY;
 
 -- Authenticated users can read/write everything (admin panel)
 CREATE POLICY "auth_select" ON websites            FOR SELECT TO authenticated USING (TRUE);
 CREATE POLICY "auth_insert" ON websites            FOR INSERT TO authenticated WITH CHECK (TRUE);
 CREATE POLICY "auth_update" ON websites            FOR UPDATE TO authenticated USING (TRUE);
 CREATE POLICY "auth_delete" ON websites            FOR DELETE TO authenticated USING (TRUE);
+
+CREATE POLICY "auth_select" ON excluded_domains    FOR SELECT TO authenticated USING (TRUE);
+CREATE POLICY "auth_insert" ON excluded_domains    FOR INSERT TO authenticated WITH CHECK (TRUE);
+CREATE POLICY "auth_delete" ON excluded_domains    FOR DELETE TO authenticated USING (TRUE);
 
 CREATE POLICY "auth_select" ON check_results       FOR SELECT TO authenticated USING (TRUE);
 CREATE POLICY "auth_insert" ON check_results       FOR INSERT TO authenticated WITH CHECK (TRUE);

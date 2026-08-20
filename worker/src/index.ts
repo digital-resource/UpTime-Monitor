@@ -374,6 +374,15 @@ async function sendOpenIncidentsDigest(env: Env) {
   await sendSlack(env, text);
 }
 
+// ─── Sync helpers ────────────────────────────────────────────
+
+// Domains a user explicitly deleted from the monitor — sync must not
+// re-import these just because they're still a zone/site upstream.
+async function getExcludedDomains(env: Env): Promise<Set<string>> {
+  const excluded = await supabaseGet(env, `excluded_domains?select=domain`) as Array<{ domain: string }>;
+  return new Set(excluded.map((e) => e.domain));
+}
+
 // ─── Cloudflare domain sync ──────────────────────────────────
 
 async function syncCloudflare(env: Env) {
@@ -393,13 +402,14 @@ async function syncCloudflare(env: Env) {
     page++;
   }
 
-  // Get existing websites from Supabase
+  // Get existing websites from Supabase, plus anything explicitly excluded
   const existing = await supabaseGet(env, `websites?select=domain`) as Array<{ domain: string }>;
   const existingDomains = new Set(existing.map((e) => e.domain));
+  const excludedDomains = await getExcludedDomains(env);
 
   let added = 0;
   for (const zone of allZones) {
-    if (existingDomains.has(zone.name)) continue;
+    if (existingDomains.has(zone.name) || excludedDomains.has(zone.name)) continue;
     await supabasePost(env, "websites", {
       name:            zone.name,
       url:             `https://${zone.name}`,
@@ -447,11 +457,12 @@ async function syncRocketNet(env: Env) {
 
     const existing = await supabaseGet(env, `websites?select=domain`) as Array<{ domain: string }>;
     const existingDomains = new Set(existing.map((e) => e.domain));
+    const excludedDomains = await getExcludedDomains(env);
 
     let added = 0;
     for (const site of sites) {
       const domain = site.domain;
-      if (!domain || existingDomains.has(domain)) continue;
+      if (!domain || existingDomains.has(domain) || excludedDomains.has(domain)) continue;
       const rawLabel = (site.label ?? "").trim().replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
       const name = rawLabel && !rawLabel.startsWith("http") ? rawLabel : domain;
       await supabasePost(env, "websites", {
@@ -502,6 +513,7 @@ async function syncWebflow(env: Env) {
 
     const existing = await supabaseGet(env, `websites?select=domain`) as Array<{ domain: string }>;
     const existingDomains = new Set(existing.map((e) => e.domain));
+    const excludedDomains = await getExcludedDomains(env);
 
     let discovered = 0;
     const rows: Record<string, unknown>[] = [];
@@ -512,7 +524,7 @@ async function syncWebflow(env: Env) {
         if (!cd.lastPublished) continue;
         discovered++;
         const domain = cd.url.replace(/^https?:\/\//, "").replace(/\/$/, "");
-        if (!domain || existingDomains.has(domain)) continue;
+        if (!domain || existingDomains.has(domain) || excludedDomains.has(domain)) continue;
         rows.push({
           name:            site.displayName ?? domain,
           url:             `https://${domain}`,
