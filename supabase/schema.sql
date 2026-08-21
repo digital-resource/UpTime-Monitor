@@ -303,6 +303,7 @@ CREATE POLICY "auth_delete" ON websites            FOR DELETE TO authenticated U
 
 CREATE POLICY "auth_select" ON excluded_domains    FOR SELECT TO authenticated USING (TRUE);
 CREATE POLICY "auth_insert" ON excluded_domains    FOR INSERT TO authenticated WITH CHECK (TRUE);
+CREATE POLICY "auth_update" ON excluded_domains    FOR UPDATE TO authenticated USING (TRUE);
 CREATE POLICY "auth_delete" ON excluded_domains    FOR DELETE TO authenticated USING (TRUE);
 
 CREATE POLICY "auth_select" ON check_results       FOR SELECT TO authenticated USING (TRUE);

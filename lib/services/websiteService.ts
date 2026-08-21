@@ -129,13 +129,17 @@ export const websiteService = {
   async delete(id: string): Promise<void> {
     const db = createClient();
     const { data: site } = await db.from("websites").select("domain").eq("id", id).single();
+    // Record the exclusion *before* removing the row. If this write fails,
+    // we abort rather than delete the site and silently lose the guarantee
+    // that sync won't bring it right back on the next hourly run.
+    if (site?.domain) {
+      const { error: excludeError } = await db
+        .from("excluded_domains")
+        .upsert({ domain: site.domain, reason: "manual delete" });
+      if (excludeError) throw new Error(`Failed to exclude domain from re-sync: ${excludeError.message}`);
+    }
     const { error } = await db.from("websites").delete().eq("id", id);
     if (error) throw new Error(error.message);
-    // Record the domain so the Cloudflare/Rocket.net/Webflow sync doesn't
-    // silently re-import it just because it's still a zone/site upstream.
-    if (site?.domain) {
-      await db.from("excluded_domains").upsert({ domain: site.domain, reason: "manual delete" });
-    }
   },
 
   async pause(id: string): Promise<Website> {
