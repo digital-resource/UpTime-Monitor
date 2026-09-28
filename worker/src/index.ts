@@ -117,8 +117,12 @@ async function checkWebsite(site: { id: string; url: string; timeout: number; ex
     // itself (confirmed repeatedly: sites returning 403 to this worker return
     // 200 to a real browser seconds later), not a real outage. Treat it as up
     // rather than manufacturing false "site is down" incidents/Slack alerts.
-    // The real HTTP code is still recorded below for anyone who wants to check.
-    const isLikelyBlock = code === 401 || code === 403;
+    // 429 gets the same treatment: up to 40 sites are checked in parallel from
+    // one shared Cloudflare IP every run, which trips host-side rate limiters
+    // (seen repeatedly on Shopify storefronts) even though real visitors from
+    // distinct IPs never hit the limit. The real HTTP code is still recorded
+    // below for anyone who wants to check.
+    const isLikelyBlock = code === 401 || code === 403 || code === 429;
     // 2xx and 3xx are both "up" — redirects mean the site is alive
     const ok = isLikelyBlock || ((code >= 200 && code < 400) && (expected === 200 ? true : code === expected));
     return {
