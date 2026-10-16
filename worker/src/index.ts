@@ -87,7 +87,31 @@ interface CheckResult {
   region:       string;
 }
 
-async function checkWebsite(site: { id: string; url: string; timeout: number; expected_http_status: number }): Promise<CheckResult> {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 520-526 are Cloudflare's "edge-to-origin" error codes, but they're also
+// what the Workers runtime itself synthesizes when *its own* outbound fetch
+// hits a connection/TLS-layer problem reaching a site — even one that isn't
+// behind Cloudflare at all (confirmed: dentondentalsolutions.com resolves to
+// a plain GCP IP, no Cloudflare anycast in its path, yet still produced a
+// "Cloudflare" 520). Seen repeatedly: a burst of unrelated client sites all
+// tripping 520 within the same few minutes, and one site stuck on 525 for
+// 230+ hours straight while loading fine for every real visitor the whole
+// time. That pattern means the Worker's own connection attempt is what's
+// failing, not the origin app. A single retry after a short delay clears the
+// transient cases; a site that fails it twice in a row is treated as a real
+// failure like any other non-2xx/3xx response.
+const CF_EDGE_ERROR_CODES = new Set([520, 521, 522, 523, 524, 525, 526]);
+
+// Retries share one small budget per cron invocation (see RETRY_BUDGET_PER_CYCLE
+// below, next to the subrequest-count math this protects) — a burst of sites
+// all hitting a CF edge code in the same cycle must not multiply the
+// per-invocation subrequest count past Cloudflare's free-plan cap.
+async function attemptFetch(
+  site: { url: string; timeout: number },
+): Promise<{ code: number | null; responseTime: number | null; err: string | null }> {
   const start = Date.now();
   const timeout = (site.timeout ?? 30) * 1000;
   const controller = new AbortController();
@@ -109,43 +133,60 @@ async function checkWebsite(site: { id: string; url: string; timeout: number; ex
       },
     });
     clearTimeout(timer);
-    const responseTime = Date.now() - start;
-    const code     = res.status;
-    const expected = site.expected_http_status ?? 200;
-    // 401/403 prove the server is up and answering — it just refused this one
-    // request. That's almost always a WAF/bot-protection flagging the checker
-    // itself (confirmed repeatedly: sites returning 403 to this worker return
-    // 200 to a real browser seconds later), not a real outage. Treat it as up
-    // rather than manufacturing false "site is down" incidents/Slack alerts.
-    // 429 gets the same treatment: up to 40 sites are checked in parallel from
-    // one shared Cloudflare IP every run, which trips host-side rate limiters
-    // (seen repeatedly on Shopify storefronts) even though real visitors from
-    // distinct IPs never hit the limit. The real HTTP code is still recorded
-    // below for anyone who wants to check.
-    const isLikelyBlock = code === 401 || code === 403 || code === 429;
-    // 2xx and 3xx are both "up" — redirects mean the site is alive
-    const ok = isLikelyBlock || ((code >= 200 && code < 400) && (expected === 200 ? true : code === expected));
-    return {
-      websiteId:    site.id,
-      status:       ok ? "up" : "down",
-      httpStatus:   code,
-      responseTime,
-      error:        ok ? null : `HTTP ${code}`,
-      region:       "cloudflare",
-    };
+    return { code: res.status, responseTime: Date.now() - start, err: null };
   } catch (err) {
     clearTimeout(timer);
     const msg = err instanceof Error ? err.message : "Unknown error";
     const isTimeout = msg.includes("abort") || msg.includes("timeout");
+    return { code: null, responseTime: null, err: isTimeout ? "Timeout" : msg };
+  }
+}
+
+async function checkWebsite(
+  site: { id: string; url: string; timeout: number; expected_http_status: number },
+  retryBudget: { n: number },
+): Promise<CheckResult> {
+  let attempt = await attemptFetch(site);
+  if (attempt.code !== null && CF_EDGE_ERROR_CODES.has(attempt.code) && retryBudget.n > 0) {
+    retryBudget.n--;
+    await sleep(500);
+    attempt = await attemptFetch(site);
+  }
+
+  if (attempt.code === null) {
     return {
       websiteId:    site.id,
       status:       "down",
       httpStatus:   null,
       responseTime: null,
-      error:        isTimeout ? "Timeout" : msg,
+      error:        attempt.err,
       region:       "cloudflare",
     };
   }
+
+  const code     = attempt.code;
+  const expected = site.expected_http_status ?? 200;
+  // 401/403 prove the server is up and answering — it just refused this one
+  // request. That's almost always a WAF/bot-protection flagging the checker
+  // itself (confirmed repeatedly: sites returning 403 to this worker return
+  // 200 to a real browser seconds later), not a real outage. Treat it as up
+  // rather than manufacturing false "site is down" incidents/Slack alerts.
+  // 429 gets the same treatment: up to 35 sites are checked in parallel from
+  // one shared Cloudflare IP every run, which trips host-side rate limiters
+  // (seen repeatedly on Shopify storefronts) even though real visitors from
+  // distinct IPs never hit the limit. The real HTTP code is still recorded
+  // below for anyone who wants to check.
+  const isLikelyBlock = code === 401 || code === 403 || code === 429;
+  // 2xx and 3xx are both "up" — redirects mean the site is alive
+  const ok = isLikelyBlock || ((code >= 200 && code < 400) && (expected === 200 ? true : code === expected));
+  return {
+    websiteId:    site.id,
+    status:       ok ? "up" : "down",
+    httpStatus:   code,
+    responseTime: attempt.responseTime,
+    error:        ok ? null : `HTTP ${code}`,
+    region:       "cloudflare",
+  };
 }
 
 // ─── Human-readable failure reasons for Slack ───────────────────
@@ -220,13 +261,15 @@ async function checkAllWebsites(env: Env) {
 
   // 1. Load the sites most overdue for a check (1 subrequest)
   //    ORDER BY last_checked_at ASC NULLS FIRST → always checks the stalest sites first.
-  //    With 672 sites and cron every 2 min, each site is checked roughly every ~30 min.
-  //    Keeping to 40 ensures total subrequests stay well within Cloudflare free-plan limits:
-  //      1 (get) + 40 (checks) + 1 (post) + 1-2 (slack) + 1 (down-incident flag)
-  //      + 1 (recovery-incident flag) + 1 (email trigger) = ~48 subrequests worst case.
+  //    With 672 sites and cron every 2 min, each site is checked roughly every ~34 min.
+  //    Keeping to 35 (down from 40, to make room for CF-edge-error retries below)
+  //    ensures total subrequests stay well within Cloudflare free-plan limits:
+  //      1 (get) + 35 (checks) + RETRY_BUDGET_PER_CYCLE (retries, capped) + 1 (post)
+  //      + 1-2 (slack) + 1 (down-incident flag) + 1 (recovery-incident flag)
+  //      + 1 (email trigger) = ~47 subrequests worst case.
   const sites = await supabaseGet(
     env,
-    `websites?monitoring_state=eq.enabled&order=last_checked_at.asc.nullsfirst&limit=40&select=id,url,domain,timeout,expected_http_status,consecutive_failures,failure_threshold,has_active_incident,active_incident_id,name,client,last_error`
+    `websites?monitoring_state=eq.enabled&order=last_checked_at.asc.nullsfirst&limit=35&select=id,url,domain,timeout,expected_http_status,consecutive_failures,failure_threshold,has_active_incident,active_incident_id,name,client,last_error`
   ) as Array<{
     id: string; url: string; domain: string; timeout: number; expected_http_status: number;
     consecutive_failures: number; failure_threshold: number;
@@ -237,8 +280,12 @@ async function checkAllWebsites(env: Env) {
   if (!Array.isArray(sites) || sites.length === 0) return;
   const siteMap = new Map(sites.map(s => [s.id, s]));
 
-  // 2. Check all 90 sites in parallel (single batch of 90 subrequests)
-  const allResults: CheckResult[] = await Promise.all(sites.map(checkWebsite));
+  // 2. Check all sites in parallel (single batch). Retries for CF edge-error
+  //    codes (520-526) share one small budget across the whole batch so a
+  //    burst of sites hitting them at once can't blow the subrequest cap.
+  const RETRY_BUDGET_PER_CYCLE = 5;
+  const retryBudget = { n: RETRY_BUDGET_PER_CYCLE };
+  const allResults: CheckResult[] = await Promise.all(sites.map(s => checkWebsite(s, retryBudget)));
 
   // 3. Bulk-insert check_results (1 subrequest)
   //    The Supabase trigger trg_check_result_insert handles all website
