@@ -95,10 +95,7 @@ function sleep(ms: number): Promise<void> {
 // exactly what the Workers runtime itself synthesizes when *its own*
 // outbound fetch can't complete, even for a site with no Cloudflare
 // anywhere in its path. A non-Cloudflare origin can never legitimately
-// produce one of these: there's no Cloudflare edge there to emit it. The
-// reliable way to tell them apart is the `cf-ray` header — Cloudflare
-// stamps every response it actually proxies (including its own error
-// pages) with one; a synthesized-by-the-runtime response never has it.
+// produce one of these: there's no Cloudflare edge there to emit it.
 // Confirmed on a live incident: 6 client sites (witheroworthodontics.com,
 // terryfamilydentistry.com, snowendo.com, etc.) all resolve straight to
 // Google Cloud IPs — no Cloudflare involved — yet every Worker-side check
@@ -106,15 +103,66 @@ function sleep(ms: number): Promise<void> {
 // real visitors the whole time. Meanwhile sleepapneabethesda.com, which
 // DOES resolve to a real Cloudflare IP, had a genuine 525 outage (confirmed
 // broken for real visitors too) that correctly needs to keep alerting.
+//
+// The `cf-ray` response header does NOT reliably distinguish these two
+// cases (tried first, confirmed wrong in production: a non-Cloudflare site
+// still logged "down" after that fix shipped) — the Workers platform
+// appears to stamp cf-ray on its own synthesized failure responses too,
+// since Workers itself runs inside Cloudflare's network regardless of the
+// destination. The only reliable signal is checking DNS ourselves.
 const CF_EDGE_ERROR_CODES = new Set([520, 521, 522, 523, 524, 525, 526]);
 
-// Retries share one small budget per cron invocation (see RETRY_BUDGET_PER_CYCLE
-// below, next to the subrequest-count math this protects) — a burst of sites
-// all hitting a CF edge code in the same cycle must not multiply the
-// per-invocation subrequest count past Cloudflare's free-plan cap.
+// Cloudflare's published IPv4 ranges (https://www.cloudflare.com/ips/).
+// Rarely changes; update from that URL if a new range starts showing up as
+// a false "not Cloudflare" verdict.
+const CLOUDFLARE_IPV4_RANGES: Array<[string, number]> = [
+  ["173.245.48.0", 20], ["103.21.244.0", 22], ["103.22.200.0", 22],
+  ["103.31.4.0", 22],   ["141.101.64.0", 18], ["108.162.192.0", 18],
+  ["190.93.240.0", 20], ["188.114.96.0", 20], ["197.234.240.0", 22],
+  ["198.41.128.0", 17], ["162.158.0.0", 15],  ["104.16.0.0", 13],
+  ["104.24.0.0", 14],   ["172.64.0.0", 13],   ["131.0.72.0", 22],
+];
+
+function ipToInt(ip: string): number | null {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return null;
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+
+function isCloudflareIp(ip: string): boolean {
+  const target = ipToInt(ip);
+  if (target === null) return false;
+  return CLOUDFLARE_IPV4_RANGES.some(([base, bits]) => {
+    const baseInt = ipToInt(base);
+    if (baseInt === null) return false;
+    const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+    return (target & mask) === (baseInt & mask);
+  });
+}
+
+// DNS-over-HTTPS lookup to check whether a hostname actually resolves
+// behind Cloudflare. Only called on the rare 520-526 path (see checkWebsite
+// below), so the extra subrequest is bounded by the same budget that caps
+// retries. If the lookup itself fails, assume Cloudflare-fronted (the safer
+// default — keeps a real outage alerting rather than silently masking it).
+async function isCloudflareFronted(hostname: string): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=A`,
+      { headers: { Accept: "application/dns-json" } },
+    );
+    const data = await res.json() as { Answer?: Array<{ data: string }> };
+    const ips = (data.Answer ?? []).map((a) => a.data).filter((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip));
+    if (ips.length === 0) return true;
+    return ips.some(isCloudflareIp);
+  } catch {
+    return true;
+  }
+}
+
 async function attemptFetch(
   site: { url: string; timeout: number },
-): Promise<{ code: number | null; responseTime: number | null; err: string | null; fromCloudflare: boolean }> {
+): Promise<{ code: number | null; responseTime: number | null; err: string | null }> {
   const start = Date.now();
   const timeout = (site.timeout ?? 30) * 1000;
   const controller = new AbortController();
@@ -137,7 +185,6 @@ async function attemptFetch(
     });
     clearTimeout(timer);
     const responseTime = Date.now() - start;
-    const fromCloudflare = res.headers.has("cf-ray");
     // We only need the status code, never the body — but leaving the body
     // stream unconsumed holds open one of the Worker's limited concurrent
     // connection slots until the runtime force-cancels it, which was
@@ -147,29 +194,40 @@ async function attemptFetch(
     if (res.body) {
       try { await res.body.cancel(); } catch { /* already closed/errored — nothing to clean up */ }
     }
-    return { code: res.status, responseTime, err: null, fromCloudflare };
+    return { code: res.status, responseTime, err: null };
   } catch (err) {
     clearTimeout(timer);
     const msg = err instanceof Error ? err.message : "Unknown error";
     const isTimeout = msg.includes("abort") || msg.includes("timeout");
-    return { code: null, responseTime: null, err: isTimeout ? "Timeout" : msg, fromCloudflare: false };
+    return { code: null, responseTime: null, err: isTimeout ? "Timeout" : msg };
   }
 }
 
+// Retries/DNS-verification share one small budget per cron invocation (see
+// RETRY_BUDGET_PER_CYCLE below, next to the subrequest-count math this
+// protects) — a burst of sites all hitting a CF edge code in the same cycle
+// must not multiply the per-invocation subrequest count past Cloudflare's
+// free-plan cap.
 async function checkWebsite(
   site: { id: string; url: string; timeout: number; expected_http_status: number },
   retryBudget: { n: number },
 ): Promise<CheckResult> {
   let attempt = await attemptFetch(site);
-  // Only worth retrying a genuine Cloudflare edge response (might be a brief
-  // edge-to-origin blip). A non-Cloudflare 520-526 is never going to change
-  // on a second try — it's the runtime's own synthetic error, and it's
-  // already going to be treated as "up" below regardless of outcome, so
-  // retrying it would just burn subrequest budget for nothing.
-  if (attempt.code !== null && CF_EDGE_ERROR_CODES.has(attempt.code) && attempt.fromCloudflare && retryBudget.n > 0) {
+  let isLikelyBlock = false;
+
+  if (attempt.code !== null && CF_EDGE_ERROR_CODES.has(attempt.code) && retryBudget.n > 0) {
     retryBudget.n--;
-    await sleep(500);
-    attempt = await attemptFetch(site);
+    const hostname = new URL(site.url).hostname;
+    const cloudflareFronted = await isCloudflareFronted(hostname);
+    if (!cloudflareFronted) {
+      // Can't possibly be a real edge response — the runtime synthesized it.
+      isLikelyBlock = true;
+    } else if (retryBudget.n > 0) {
+      // Genuinely Cloudflare-fronted — worth one retry for a brief edge blip.
+      retryBudget.n--;
+      await sleep(500);
+      attempt = await attemptFetch(site);
+    }
   }
 
   if (attempt.code === null) {
@@ -196,13 +254,10 @@ async function checkWebsite(
   // distinct IPs never hit the limit. The real HTTP code is still recorded
   // below for anyone who wants to check.
   //
-  // A 520-526 with no cf-ray header didn't come from a real Cloudflare edge
-  // at all (see CF_EDGE_ERROR_CODES above) — treat it the same way. A
-  // genuine Cloudflare-proxied 520-526 (cf-ray present) is NOT included
-  // here and falls through to the normal down-counting below.
-  const isLikelyBlock =
-    code === 401 || code === 403 || code === 429 ||
-    (CF_EDGE_ERROR_CODES.has(code) && !attempt.fromCloudflare);
+  // A 520-526 confirmed NOT Cloudflare-fronted (via DNS, above) falls into
+  // the same bucket — it's never a real signal. A genuine Cloudflare-fronted
+  // 520-526 is NOT included here and falls through to normal down-counting.
+  isLikelyBlock = isLikelyBlock || code === 401 || code === 403 || code === 429;
   // 2xx and 3xx are both "up" — redirects mean the site is alive
   const ok = isLikelyBlock || ((code >= 200 && code < 400) && (expected === 200 ? true : code === expected));
   return {
@@ -290,9 +345,10 @@ async function checkAllWebsites(env: Env) {
   //    With 672 sites and cron every 2 min, each site is checked roughly every ~34 min.
   //    Keeping to 35 (down from 40, to make room for CF-edge-error retries below)
   //    ensures total subrequests stay well within Cloudflare free-plan limits:
-  //      1 (get) + 35 (checks) + RETRY_BUDGET_PER_CYCLE (retries, capped) + 1 (post)
-  //      + 1-2 (slack) + 1 (down-incident flag) + 1 (recovery-incident flag)
-  //      + 1 (email trigger) = ~47 subrequests worst case.
+  //      1 (get) + 35 (checks) + RETRY_BUDGET_PER_CYCLE (DNS lookups + retries,
+  //      capped as ONE shared pool — see checkWebsite) + 1 (post) + 1-2 (slack)
+  //      + 1 (down-incident flag) + 1 (recovery-incident flag) + 1 (email
+  //      trigger) = ~47 subrequests worst case.
   const sites = await supabaseGet(
     env,
     `websites?monitoring_state=eq.enabled&order=last_checked_at.asc.nullsfirst&limit=35&select=id,url,domain,timeout,expected_http_status,consecutive_failures,failure_threshold,has_active_incident,active_incident_id,name,client,last_error`
