@@ -91,18 +91,21 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// 520-526 are Cloudflare's "edge-to-origin" error codes, but they're also
-// what the Workers runtime itself synthesizes when *its own* outbound fetch
-// hits a connection/TLS-layer problem reaching a site — even one that isn't
-// behind Cloudflare at all (confirmed: dentondentalsolutions.com resolves to
-// a plain GCP IP, no Cloudflare anycast in its path, yet still produced a
-// "Cloudflare" 520). Seen repeatedly: a burst of unrelated client sites all
-// tripping 520 within the same few minutes, and one site stuck on 525 for
-// 230+ hours straight while loading fine for every real visitor the whole
-// time. That pattern means the Worker's own connection attempt is what's
-// failing, not the origin app. A single retry after a short delay clears the
-// transient cases; a site that fails it twice in a row is treated as a real
-// failure like any other non-2xx/3xx response.
+// 520-526 are Cloudflare's "edge-to-origin" error codes — but they're also
+// exactly what the Workers runtime itself synthesizes when *its own*
+// outbound fetch can't complete, even for a site with no Cloudflare
+// anywhere in its path. A non-Cloudflare origin can never legitimately
+// produce one of these: there's no Cloudflare edge there to emit it. The
+// reliable way to tell them apart is the `cf-ray` header — Cloudflare
+// stamps every response it actually proxies (including its own error
+// pages) with one; a synthesized-by-the-runtime response never has it.
+// Confirmed on a live incident: 6 client sites (witheroworthodontics.com,
+// terryfamilydentistry.com, snowendo.com, etc.) all resolve straight to
+// Google Cloud IPs — no Cloudflare involved — yet every Worker-side check
+// came back "520" for 2+ hours straight while the sites loaded fine for
+// real visitors the whole time. Meanwhile sleepapneabethesda.com, which
+// DOES resolve to a real Cloudflare IP, had a genuine 525 outage (confirmed
+// broken for real visitors too) that correctly needs to keep alerting.
 const CF_EDGE_ERROR_CODES = new Set([520, 521, 522, 523, 524, 525, 526]);
 
 // Retries share one small budget per cron invocation (see RETRY_BUDGET_PER_CYCLE
@@ -111,7 +114,7 @@ const CF_EDGE_ERROR_CODES = new Set([520, 521, 522, 523, 524, 525, 526]);
 // per-invocation subrequest count past Cloudflare's free-plan cap.
 async function attemptFetch(
   site: { url: string; timeout: number },
-): Promise<{ code: number | null; responseTime: number | null; err: string | null }> {
+): Promise<{ code: number | null; responseTime: number | null; err: string | null; fromCloudflare: boolean }> {
   const start = Date.now();
   const timeout = (site.timeout ?? 30) * 1000;
   const controller = new AbortController();
@@ -134,6 +137,7 @@ async function attemptFetch(
     });
     clearTimeout(timer);
     const responseTime = Date.now() - start;
+    const fromCloudflare = res.headers.has("cf-ray");
     // We only need the status code, never the body — but leaving the body
     // stream unconsumed holds open one of the Worker's limited concurrent
     // connection slots until the runtime force-cancels it, which was
@@ -143,12 +147,12 @@ async function attemptFetch(
     if (res.body) {
       try { await res.body.cancel(); } catch { /* already closed/errored — nothing to clean up */ }
     }
-    return { code: res.status, responseTime, err: null };
+    return { code: res.status, responseTime, err: null, fromCloudflare };
   } catch (err) {
     clearTimeout(timer);
     const msg = err instanceof Error ? err.message : "Unknown error";
     const isTimeout = msg.includes("abort") || msg.includes("timeout");
-    return { code: null, responseTime: null, err: isTimeout ? "Timeout" : msg };
+    return { code: null, responseTime: null, err: isTimeout ? "Timeout" : msg, fromCloudflare: false };
   }
 }
 
@@ -157,7 +161,12 @@ async function checkWebsite(
   retryBudget: { n: number },
 ): Promise<CheckResult> {
   let attempt = await attemptFetch(site);
-  if (attempt.code !== null && CF_EDGE_ERROR_CODES.has(attempt.code) && retryBudget.n > 0) {
+  // Only worth retrying a genuine Cloudflare edge response (might be a brief
+  // edge-to-origin blip). A non-Cloudflare 520-526 is never going to change
+  // on a second try — it's the runtime's own synthetic error, and it's
+  // already going to be treated as "up" below regardless of outcome, so
+  // retrying it would just burn subrequest budget for nothing.
+  if (attempt.code !== null && CF_EDGE_ERROR_CODES.has(attempt.code) && attempt.fromCloudflare && retryBudget.n > 0) {
     retryBudget.n--;
     await sleep(500);
     attempt = await attemptFetch(site);
@@ -186,7 +195,14 @@ async function checkWebsite(
   // (seen repeatedly on Shopify storefronts) even though real visitors from
   // distinct IPs never hit the limit. The real HTTP code is still recorded
   // below for anyone who wants to check.
-  const isLikelyBlock = code === 401 || code === 403 || code === 429;
+  //
+  // A 520-526 with no cf-ray header didn't come from a real Cloudflare edge
+  // at all (see CF_EDGE_ERROR_CODES above) — treat it the same way. A
+  // genuine Cloudflare-proxied 520-526 (cf-ray present) is NOT included
+  // here and falls through to the normal down-counting below.
+  const isLikelyBlock =
+    code === 401 || code === 403 || code === 429 ||
+    (CF_EDGE_ERROR_CODES.has(code) && !attempt.fromCloudflare);
   // 2xx and 3xx are both "up" — redirects mean the site is alive
   const ok = isLikelyBlock || ((code >= 200 && code < 400) && (expected === 200 ? true : code === expected));
   return {
