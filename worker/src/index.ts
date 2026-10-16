@@ -133,7 +133,17 @@ async function attemptFetch(
       },
     });
     clearTimeout(timer);
-    return { code: res.status, responseTime: Date.now() - start, err: null };
+    const responseTime = Date.now() - start;
+    // We only need the status code, never the body — but leaving the body
+    // stream unconsumed holds open one of the Worker's limited concurrent
+    // connection slots until the runtime force-cancels it, which was
+    // spamming "stalled HTTP response" warnings (worse now that 520-526
+    // responses can trigger a second fetch for the same site). Cancel it
+    // explicitly so the slot frees up immediately.
+    if (res.body) {
+      try { await res.body.cancel(); } catch { /* already closed/errored — nothing to clean up */ }
+    }
+    return { code: res.status, responseTime, err: null };
   } catch (err) {
     clearTimeout(timer);
     const msg = err instanceof Error ? err.message : "Unknown error";
