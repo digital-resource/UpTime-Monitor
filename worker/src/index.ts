@@ -208,25 +208,16 @@ async function attemptFetch(
 // protects) — a burst of sites all hitting a CF edge code in the same cycle
 // must not multiply the per-invocation subrequest count past Cloudflare's
 // free-plan cap.
-// Confirmed actually down, not a checker false positive — never apply the
-// 401/403/429/520-526 "probably a WAF/edge quirk" treatment to these, even
-// though they'd otherwise qualify. healthmarketsolution.com keeps returning
-// 403 to every check, but that's a real outage on this client's site, not
-// bot-blocking — so it must be allowed to count toward the failure
-// threshold and alert like any other down site.
-const NEVER_MASK_HOSTNAMES = new Set(["healthmarketsolution.com"]);
-
 async function checkWebsite(
   site: { id: string; url: string; timeout: number; expected_http_status: number },
   retryBudget: { n: number },
 ): Promise<CheckResult> {
-  const hostname = new URL(site.url).hostname;
-  const neverMask = NEVER_MASK_HOSTNAMES.has(hostname);
   let attempt = await attemptFetch(site);
   let isLikelyBlock = false;
 
-  if (!neverMask && attempt.code !== null && CF_EDGE_ERROR_CODES.has(attempt.code) && retryBudget.n > 0) {
+  if (attempt.code !== null && CF_EDGE_ERROR_CODES.has(attempt.code) && retryBudget.n > 0) {
     retryBudget.n--;
+    const hostname = new URL(site.url).hostname;
     const cloudflareFronted = await isCloudflareFronted(hostname);
     if (!cloudflareFronted) {
       // Can't possibly be a real edge response — the runtime synthesized it.
@@ -266,7 +257,7 @@ async function checkWebsite(
   // A 520-526 confirmed NOT Cloudflare-fronted (via DNS, above) falls into
   // the same bucket — it's never a real signal. A genuine Cloudflare-fronted
   // 520-526 is NOT included here and falls through to normal down-counting.
-  isLikelyBlock = isLikelyBlock || (!neverMask && (code === 401 || code === 403 || code === 429));
+  isLikelyBlock = isLikelyBlock || code === 401 || code === 403 || code === 429;
   // 2xx and 3xx are both "up" — redirects mean the site is alive
   const ok = isLikelyBlock || ((code >= 200 && code < 400) && (expected === 200 ? true : code === expected));
   return {
